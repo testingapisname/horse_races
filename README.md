@@ -3,7 +3,7 @@
 ![Horse Selection](pick.png)
 
 **Last Call Derby** is a multiplayer, terminal-based horse-racing game that runs entirely over SSH.
-Players connect from their terminals, pick their favorite horses, chat in real time, and watch them race across the screen — all rendered live with colorful ANSI effects.
+Players connect from their terminals, pick their favorite horses, and watch them race across the screen — all rendered live with colorful ANSI effects.
 
 ---
 
