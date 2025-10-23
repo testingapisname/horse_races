@@ -1,7 +1,3 @@
-Here’s your clean, **pure markdown** `README.md` — no code blocks, just polished text and image placement suitable for GitHub.
-
----
-
 # 🐎 Last Call Derby
 
 ![Horse Selection](pick.png)
