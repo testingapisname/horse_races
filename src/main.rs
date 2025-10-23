@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use rand::rngs::OsRng;
-use rand::seq::SliceRandom;
 use russh::keys::{Certificate, *};
 use russh::server::{Msg, Server as _, Session};
 use russh::*;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
+
+mod names;
+use names::random_names;
 
 #[tokio::main]
 async fn main() {
@@ -30,6 +32,7 @@ async fn main() {
         clients: Arc::new(Mutex::new(HashMap::new())),
         player_horses: Arc::new(Mutex::new(HashMap::new())),
         usernames: Arc::new(Mutex::new(HashMap::new())),
+        current_horses: Arc::new(Mutex::new(Vec::new())),
         id: 0,
     };
 
@@ -40,6 +43,7 @@ async fn main() {
     let clients_for_race = sh.clients.clone();
     let player_horses_for_race = sh.player_horses.clone();
     let usernames_for_race = sh.usernames.clone();
+    let current_horses_for_race = sh.current_horses.clone();
 
     let server = sh.run_on_socket(config, &socket);
     let handle = server.handle();
@@ -52,6 +56,7 @@ async fn main() {
                 clients_for_race.clone(),
                 player_horses_for_race.clone(),
                 usernames_for_race.clone(),
+                current_horses_for_race.clone(),
             )
             .await;
             sleep(Duration::from_secs(20)).await;
@@ -72,6 +77,7 @@ struct Server {
     clients: Arc<Mutex<HashMap<usize, (ChannelId, russh::server::Handle)>>>,
     player_horses: Arc<Mutex<HashMap<usize, String>>>,
     usernames: Arc<Mutex<HashMap<usize, String>>>,
+    current_horses: Arc<Mutex<Vec<String>>>,
     id: usize,
 }
 
@@ -114,7 +120,7 @@ impl server::Handler for Server {
             clients.insert(id, (channel.id(), handle.clone()));
         }
 
-        // Welcome new player
+        // Welcome message
         let chan_id = channel.id();
         tokio::spawn(async move {
             sleep(Duration::from_millis(300)).await;
@@ -161,9 +167,14 @@ impl server::Handler for Server {
         }
 
         let input = String::from_utf8_lossy(data).trim().to_string();
-        let horses = vec!["Thunderhoof", "BeerGuzzler", "Shotglass", "Hangover Express"];
+        let horses = self.current_horses.lock().await.clone();
 
-        // Handle horse selection only
+        // Ignore if no race currently running
+        if horses.is_empty() {
+            return Ok(());
+        }
+
+        // Handle horse selection
         if let Ok(choice) = input.parse::<usize>() {
             if (1..=horses.len()).contains(&choice) {
                 let pick = horses[choice - 1].to_string();
@@ -181,7 +192,6 @@ impl server::Handler for Server {
                 let msg = format!("\r\n✅ {} chose {}! Good luck!\r\n", name, pick);
                 session.data(channel, CryptoVec::from(msg.as_bytes())).ok();
 
-                // Broadcast to all players
                 let broadcast = format!("📣 {} has picked {}!\r\n", name, pick);
                 let mut clients = self.clients.lock().await;
                 for (_, (chan, s)) in clients.iter_mut() {
@@ -212,23 +222,30 @@ async fn run_race(
     clients: Arc<Mutex<HashMap<usize, (ChannelId, russh::server::Handle)>>>,
     player_horses: Arc<Mutex<HashMap<usize, String>>>,
     usernames: Arc<Mutex<HashMap<usize, String>>>,
+    current_horses: Arc<Mutex<Vec<String>>>,
 ) {
-    let horses = vec!["Thunderhoof", "BeerGuzzler", "Shotglass", "Hangover Express"];
+    let horses = random_names();
+    {
+        let mut shared = current_horses.lock().await;
+        *shared = horses.clone();
+    }
+
     let track_length = 50;
 
     // Betting phase
     {
         let mut clients_lock = clients.lock().await;
+
+        let mut msg = String::from("\r\n🏁 A new race is about to start! Place your bets! 🏁\r\n");
+        msg.push_str("Pick your horse by typing its number:\r\n");
+
+        for (i, horse) in horses.iter().enumerate() {
+            msg.push_str(&format!("  {}. {}\r\n", i + 1, horse));
+        }
+
+        msg.push_str("You have 10 seconds before the race starts...\r\n\r\n");
+
         for (_id, (chan, s)) in clients_lock.iter_mut() {
-            let msg = concat!(
-                "\r\n🏁 A new race is about to start! Place your bets! 🏁\r\n",
-                "Pick your horse by typing its number:\r\n",
-                "  1. Thunderhoof\r\n",
-                "  2. BeerGuzzler\r\n",
-                "  3. Shotglass\r\n",
-                "  4. Hangover Express\r\n",
-                "You have 10 seconds before the race starts...\r\n\r\n"
-            );
             let _ = s.data(*chan, CryptoVec::from(msg.as_bytes())).await;
         }
     }
@@ -237,25 +254,24 @@ async fn run_race(
 
     // Pick random winner
     let winner_index = rand::random::<usize>() % horses.len();
-    let winner = horses[winner_index];
+    let winner = &horses[winner_index];
 
     let mut progress = vec![0; horses.len()];
 
     // Animate race
     loop {
         let mut frame = String::new();
-        frame.push_str("\x1b[2J\x1b[H"); // clear screen
+        frame.push_str("\x1b[2J\x1b[H");
         frame.push_str("🏇 The Last Call Derby 🏇\r\n");
         frame.push_str("=".repeat(track_length + 10).as_str());
         frame.push_str("\r\n");
 
         let mut finished = true;
         for (i, horse) in horses.iter().enumerate() {
-            // Speed bias: winner runs faster
             if progress[i] < track_length {
                 finished = false;
-                let speed = if *horse == winner {
-                    2 + (rand::random::<u8>() % 2) // faster
+                let speed = if *horse == *winner {
+                    2 + (rand::random::<u8>() % 2)
                 } else {
                     1 + (rand::random::<u8>() % 2)
                 };
@@ -297,7 +313,7 @@ async fn run_race(
                 .unwrap_or_else(|| format!("Player #{}", id));
 
             match map.get(id) {
-                Some(pick) if pick == winner => {
+                Some(pick) if *pick == *winner => {
                     let msg = format!(
                         "\r\n🏆 Winner: {} 🏆\r\n🎉 Congrats {}, you picked the winner!\r\n",
                         winner, name
@@ -322,7 +338,6 @@ async fn run_race(
         }
     }
 
-    // Reset picks for next race
     {
         let mut map = player_horses.lock().await;
         map.clear();
