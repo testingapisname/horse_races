@@ -46,7 +46,7 @@ async fn main() {
 
     // 🏇 Start recurring races
     tokio::spawn(async move {
-        sleep(Duration::from_secs(20)).await; // give time for people to join
+        sleep(Duration::from_secs(20)).await; // wait for players to join
         loop {
             run_race(
                 clients_for_race.clone(),
@@ -54,7 +54,7 @@ async fn main() {
                 usernames_for_race.clone(),
             )
             .await;
-            sleep(Duration::from_secs(15)).await;
+            sleep(Duration::from_secs(20)).await;
         }
     });
 
@@ -114,7 +114,7 @@ impl server::Handler for Server {
             clients.insert(id, (channel.id(), handle.clone()));
         }
 
-        // Greet player
+        // Welcome new player
         let chan_id = channel.id();
         tokio::spawn(async move {
             sleep(Duration::from_millis(300)).await;
@@ -122,7 +122,7 @@ impl server::Handler for Server {
                 "\r\n🐎  Welcome to Last Call Derby! 🐎\r\n",
                 "=====================================\r\n",
                 "You’ll be prompted to pick your horse before each race.\r\n",
-                "Chat messages are broadcast to everyone.\r\n\r\n"
+                "Just type the horse number (1–4) when asked.\r\n\r\n"
             );
             let _ = handle.data(chan_id, CryptoVec::from(welcome.as_bytes())).await;
         });
@@ -135,7 +135,6 @@ impl server::Handler for Server {
         user: &str,
         _key: &ssh_key::PublicKey,
     ) -> Result<server::Auth, Self::Error> {
-        // store SSH username
         let mut names = self.usernames.lock().await;
         names.insert(self.id, user.to_string());
         Ok(server::Auth::Accept)
@@ -162,56 +161,35 @@ impl server::Handler for Server {
         }
 
         let input = String::from_utf8_lossy(data).trim().to_string();
-        if input.is_empty() {
-            return Ok(());
-        }
-
         let horses = vec!["Thunderhoof", "BeerGuzzler", "Shotglass", "Hangover Express"];
 
-        // Handle horse selection
+        // Handle horse selection only
         if let Ok(choice) = input.parse::<usize>() {
             if (1..=horses.len()).contains(&choice) {
                 let pick = horses[choice - 1].to_string();
-
                 let mut map = self.player_horses.lock().await;
                 map.insert(self.id, pick.clone());
                 drop(map);
 
-                // lookup username
                 let names = self.usernames.lock().await;
-                let username = names
+                let name = names
                     .get(&self.id)
                     .cloned()
                     .unwrap_or_else(|| format!("Player #{}", self.id));
                 drop(names);
 
-                // confirm to picker
-                let msg_self = format!("\r\n✅ You chose {}! Good luck, {}!\r\n", pick, username);
-                session.data(channel, CryptoVec::from(msg_self.as_bytes())).ok();
+                let msg = format!("\r\n✅ {} chose {}! Good luck!\r\n", name, pick);
+                session.data(channel, CryptoVec::from(msg.as_bytes())).ok();
 
-                // announce to everyone
-                let announce = format!("📢 {} picked {}\r\n", username, pick);
+                // Broadcast to all players
+                let broadcast = format!("📣 {} has picked {}!\r\n", name, pick);
                 let mut clients = self.clients.lock().await;
                 for (_, (chan, s)) in clients.iter_mut() {
-                    let _ = s.data(*chan, CryptoVec::from(announce.as_bytes())).await;
+                    let _ = s.data(*chan, CryptoVec::from(broadcast.as_bytes())).await;
                 }
 
                 return Ok(());
             }
-        }
-
-        // Otherwise treat as chat
-        let names = self.usernames.lock().await;
-        let username = names
-            .get(&self.id)
-            .cloned()
-            .unwrap_or_else(|| format!("Player #{}", self.id));
-        drop(names);
-
-        let msg = format!("💬 {}: {}\r\n", username, input);
-        let mut clients = self.clients.lock().await;
-        for (_, (chan, s)) in clients.iter_mut() {
-            let _ = s.data(*chan, CryptoVec::from(msg.as_bytes())).await;
         }
 
         Ok(())
@@ -229,16 +207,16 @@ impl Drop for Server {
     }
 }
 
-// 🏇 Race animation + betting logic
+// 🏇 Race animation + finish line
 async fn run_race(
     clients: Arc<Mutex<HashMap<usize, (ChannelId, russh::server::Handle)>>>,
     player_horses: Arc<Mutex<HashMap<usize, String>>>,
     usernames: Arc<Mutex<HashMap<usize, String>>>,
 ) {
     let horses = vec!["Thunderhoof", "BeerGuzzler", "Shotglass", "Hangover Express"];
-    let total_length = 30;
+    let track_length = 50;
 
-    // Betting phase prompt
+    // Betting phase
     {
         let mut clients_lock = clients.lock().await;
         for (_id, (chan, s)) in clients_lock.iter_mut() {
@@ -255,46 +233,42 @@ async fn run_race(
         }
     }
 
-    // Show live betting board
-    {
-        let map = player_horses.lock().await;
-        let names = usernames.lock().await;
-        let mut board = String::from("🐎 Current Bets:\r\n");
-        for (id, pick) in map.iter() {
-            let name = names
-                .get(id)
-                .cloned()
-                .unwrap_or_else(|| format!("Player #{}", id));
-            board.push_str(&format!("- {}: {}\r\n", name, pick));
-        }
-        board.push_str("\r\n");
-        let data = CryptoVec::from(board.as_bytes());
-        let mut clients_lock = clients.lock().await;
-        for (_, (chan, s)) in clients_lock.iter_mut() {
-            let _ = s.data(*chan, data.clone()).await;
-        }
-    }
-
-    // 10 second wait
     sleep(Duration::from_secs(10)).await;
 
-    // Random winner
-    let winner = horses.choose(&mut rand::thread_rng()).unwrap();
+    // Pick random winner
+    let winner_index = rand::random::<usize>() % horses.len();
+    let winner = horses[winner_index];
 
-    // 🏇 Race animation
-    for step in 0..total_length {
+    let mut progress = vec![0; horses.len()];
+
+    // Animate race
+    loop {
         let mut frame = String::new();
-        frame.push_str("\x1b[2J\x1b[H"); // clear + home cursor
+        frame.push_str("\x1b[2J\x1b[H"); // clear screen
         frame.push_str("🏇 The Last Call Derby 🏇\r\n");
-        frame.push_str("==============================\r\n");
+        frame.push_str("=".repeat(track_length + 10).as_str());
+        frame.push_str("\r\n");
 
+        let mut finished = true;
         for (i, horse) in horses.iter().enumerate() {
-            let pos = (step + i * 3) % total_length;
-            frame.push_str(&format!("{:15}: {}\r\n", horse, "-".repeat(pos) + "🐎"));
+            // Speed bias: winner runs faster
+            if progress[i] < track_length {
+                finished = false;
+                let speed = if *horse == winner {
+                    2 + (rand::random::<u8>() % 2) // faster
+                } else {
+                    1 + (rand::random::<u8>() % 2)
+                };
+                progress[i] = (progress[i] + speed as usize).min(track_length);
+            }
+
+            let bar = "-".repeat(progress[i]) + "🐎";
+            let spaces = " ".repeat(track_length.saturating_sub(progress[i]));
+            frame.push_str(&format!("{:15}: {}{}|🏁|\r\n", horse, bar, spaces));
         }
 
-        frame.push_str("==============================\r\n");
-        frame.push_str("(Press Ctrl+C to exit)\r\n");
+        frame.push_str("=".repeat(track_length + 10).as_str());
+        frame.push_str("\r\n(Press Ctrl+C to exit)\r\n");
 
         let data = CryptoVec::from(frame.as_bytes());
         let mut clients_lock = clients.lock().await;
@@ -303,10 +277,14 @@ async fn run_race(
         }
         drop(clients_lock);
 
+        if finished {
+            break;
+        }
+
         sleep(Duration::from_millis(200)).await;
     }
 
-    // 🏁 Results
+    // Announce results
     {
         let mut clients_lock = clients.lock().await;
         let map = player_horses.lock().await;
