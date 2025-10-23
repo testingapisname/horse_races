@@ -27,7 +27,7 @@ Every round begins with a short betting phase, followed by a live race animation
 ![Race Animation](race.png)
 
 * Each player’s **SSH username** is displayed as their racing name
-* Real-time **bet announcements** and **chat messages**
+* Real-time **bet announcements**
 * A shared **betting board** before every race shows everyone’s picks
 * Races are **animated live** with a full-screen track view
 * Winners are **announced to all players** with automatic drink penalties for non-bettors
@@ -69,10 +69,3 @@ Every race selects a random winner — fortune favors the bold.
 | Horse Selection       | Race in Progress      |
 | --------------------- | --------------------- |
 | ![pick.png](pick.png) | ![race.png](race.png) |
-
----
-
-## 🍻 Credits
-
-Created as a terminal party game for developers who love Rust, racing, and rivalry.
-Grab a drink, place your bets, and let the **Last Call Derby** begin.
